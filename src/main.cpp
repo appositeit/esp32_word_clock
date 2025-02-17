@@ -50,6 +50,151 @@ Timezone Australia;
 // Add WiFiManager instance
 WiFiManager wm;
 
+// Add after LED configuration
+#define LIGHT_SENSOR_PIN 2  // ADC pin for light sensor
+#define LIGHT_SAMPLES 10    // Number of samples to average
+
+// Add brightness settings structure
+struct BrightnessSettings {
+    int darkBrightness = 20;
+    int lightBrightness = 255;
+    int threshold = 2000;
+} brightnessSettings;
+
+// Add function declarations at the top with others
+int readLightLevel();
+void updateBrightness();
+void bindServerCallback();
+
+// At the top of the file with other globals
+const char* BRIGHTNESS_PAGE_HTML = R"(
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name='viewport' content='width=device-width, initial-scale=1'>
+        <title>Brightness Settings</title>
+        <style>
+            body { font-family: Arial; margin: 20px; background: #f0f0f0; }
+            .container { 
+                background: white;
+                padding: 20px;
+                border-radius: 4px;
+                max-width: 600px;
+                margin: 0 auto;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .setting {
+                margin: 15px 0;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            label { margin-right: 10px; }
+            input {
+                width: 100px;
+                padding: 5px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+            .status {
+                background: #f8f8f8;
+                padding: 15px;
+                border-radius: 4px;
+                margin: 15px 0;
+                text-align: center;
+            }
+            .buttons {
+                margin-top: 20px;
+                text-align: center;
+            }
+            button {
+                padding: 10px 20px;
+                margin: 0 5px;
+                background: #1fa3ec;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            }
+            button.back { background: #666; }
+            button:hover { opacity: 0.9; }
+        </style>
+    </head>
+    <body>
+        <div class='container'>
+            <h2 style='text-align: center;'>Brightness Settings</h2>
+            
+            <div class='status'>
+                <div>Current Time: <span id='time'>--:--</span></div>
+                <div>Room Light Level: <span id='lightLevel'>--</span></div>
+                <div>Current Brightness: <span id='brightness'>--</span></div>
+            </div>
+
+            <form id='brightnessForm'>
+                <div class='setting'>
+                    <label>Dark Mode Brightness:</label>
+                    <input type='number' name='darkBrightness' min='0' max='255'>
+                </div>
+                
+                <div class='setting'>
+                    <label>Light Mode Brightness:</label>
+                    <input type='number' name='lightBrightness' min='0' max='255'>
+                </div>
+                
+                <div class='setting'>
+                    <label>Light/Dark Threshold:</label>
+                    <input type='number' name='threshold' min='0'>
+                </div>
+                
+                <div class='buttons'>
+                    <button type='submit'>Save Settings</button>
+                    <button type='button' class='back' onclick='window.location.href="/"'>Back</button>
+                </div>
+            </form>
+        </div>
+
+        <script>
+            // Update status every 5 seconds
+            function updateStatus() {
+                fetch('/api/status')
+                    .then(r => r.json())
+                    .then(data => {
+                        document.getElementById('lightLevel').textContent = data.lightLevel;
+                        document.getElementById('brightness').textContent = data.currentBrightness;
+                        document.getElementById('time').textContent = new Date().toLocaleTimeString();
+                        
+                        // Update form values with current settings
+                        document.querySelector('[name="darkBrightness"]').value = data.settings.darkBrightness;
+                        document.querySelector('[name="lightBrightness"]').value = data.settings.lightBrightness;
+                        document.querySelector('[name="threshold"]').value = data.settings.threshold;
+                    })
+                    .catch(console.error);
+            }
+            
+            // Initial update and start interval
+            updateStatus();
+            setInterval(updateStatus, 5000);
+            
+            // Handle form submission
+            document.getElementById('brightnessForm').onsubmit = function(e) {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+                fetch('/api/saveBrightness', {
+                    method: 'POST',
+                    body: formData
+                }).then(() => {
+                    alert('Settings saved');
+                    updateStatus();  // Refresh display after save
+                }).catch(err => {
+                    alert('Error saving settings');
+                    console.error(err);
+                });
+            };
+        </script>
+    </body>
+    </html>
+)";
+
 /**
  * LED Matrix Layout (8x8):
  * The matrix is arranged in a zig-zag pattern, with words overlaid on a mask.
@@ -113,14 +258,60 @@ void testLEDs() {
     FastLED.show();
 }
 
-/**
- * Attempts to connect to WiFi with multiple retries
- * Will attempt connection maxAttempts times before giving up
- */
+// Add this function before connectToWiFi()
+void bindServerCallback() {
+    Serial.println("Binding server routes...");
+    
+    // Brightness configuration page
+    wm.server->on("/brightness", HTTP_GET, []() {
+        wm.server->send(200, "text/html", BRIGHTNESS_PAGE_HTML);
+    });
+    
+    // Get all status information
+    wm.server->on("/api/status", HTTP_GET, []() {
+        String json = "{";
+        json += "\"lightLevel\":" + String(readLightLevel()) + ",";
+        json += "\"currentBrightness\":" + String(FastLED.getBrightness()) + ",";
+        json += "\"settings\":{";
+        json += "\"darkBrightness\":" + String(brightnessSettings.darkBrightness) + ",";
+        json += "\"lightBrightness\":" + String(brightnessSettings.lightBrightness) + ",";
+        json += "\"threshold\":" + String(brightnessSettings.threshold);
+        json += "}}";
+        wm.server->send(200, "application/json", json);
+    });
+    
+    // Save brightness settings
+    wm.server->on("/api/saveBrightness", HTTP_POST, []() {
+        bool changed = false;
+        
+        if (wm.server->hasArg("darkBrightness")) {
+            brightnessSettings.darkBrightness = wm.server->arg("darkBrightness").toInt();
+            changed = true;
+        }
+        if (wm.server->hasArg("lightBrightness")) {
+            brightnessSettings.lightBrightness = wm.server->arg("lightBrightness").toInt();
+            changed = true;
+        }
+        if (wm.server->hasArg("threshold")) {
+            brightnessSettings.threshold = wm.server->arg("threshold").toInt();
+            changed = true;
+        }
+        
+        if (changed) {
+            updateBrightness();
+        }
+        
+        wm.server->send(200, "text/plain", "OK");
+    });
+    
+    Serial.println("Routes bound successfully");
+}
+
+// Then modify connectToWiFi()
 void connectToWiFi() {
     Serial.println("Starting WiFiManager...");
     
-    // Add custom HTML with time display and auto-update
+    // Add custom HTML with time display and brightness button
     const char* customHTML = R"(
         <div id='time-display' style='
             background: white;
@@ -132,13 +323,23 @@ void connectToWiFi() {
         '>
             Current Time: <span id='current-time'>--:--</span>
         </div>
+        <div style='text-align: center; margin: 10px 0;'>
+            <button onclick='window.location.href="/brightness"' style='
+                padding: 10px 20px;
+                font-size: 1.1em;
+                background: #1fa3ec;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            '>Configure Brightness</button>
+        </div>
         <script>
             function updateTime() {
                 const now = new Date();
                 const timeStr = now.toLocaleTimeString();
                 document.getElementById('current-time').textContent = timeStr;
             }
-            // Update immediately and then every second
             updateTime();
             setInterval(updateTime, 1000);
         </script>
@@ -148,6 +349,9 @@ void connectToWiFi() {
     wm.setDebugOutput(true);
     wm.setCaptivePortalEnable(true);
     wm.setConfigPortalTimeout(180);
+    
+    // Set up the callback for adding our routes
+    wm.setWebServerCallback(bindServerCallback);
     
     // Add custom HTML to the portal
     wm.setCustomHeadElement(customHTML);
@@ -327,6 +531,30 @@ void displayTime(time_t localTime) {
         
         FastLED.show();
     }
+}
+
+// Add these functions after testLEDs()
+int readLightLevel() {
+    int total = 0;
+    for(int i = 0; i < LIGHT_SAMPLES; i++) {
+        total += analogRead(LIGHT_SENSOR_PIN);
+        delay(10);
+    }
+    return total / LIGHT_SAMPLES;
+}
+
+void updateBrightness() {
+    int lightLevel = readLightLevel();
+    int newBrightness;
+    
+    if (lightLevel < brightnessSettings.threshold) {
+        newBrightness = brightnessSettings.darkBrightness;
+    } else {
+        newBrightness = brightnessSettings.lightBrightness;
+    }
+    
+    FastLED.setBrightness(newBrightness);
+    FastLED.show();
 }
 
 /**
