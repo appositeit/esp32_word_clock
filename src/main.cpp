@@ -37,10 +37,7 @@
 #include <FastLED.h>
 #include <WiFi.h>
 #include <ezTime.h>
-
-// WiFi credentials
-const char* ssid = "U908";
-const char* password = "k1ndleb00ks";
+#include <WiFiManager.h>
 
 // LED configuration
 #define NUM_LEDS 64
@@ -49,6 +46,9 @@ CRGB leds[NUM_LEDS];
 
 // Timezone
 Timezone Australia;
+
+// Add WiFiManager instance
+WiFiManager wm;
 
 /**
  * LED Matrix Layout (8x8):
@@ -104,9 +104,11 @@ void testLEDs() {
         fill_solid(leds, NUM_LEDS, CRGB::Black);  // Clear all
         leds[i] = CRGB::White;  // Light current LED
         FastLED.show();
-        Serial.printf("Testing LED %d\n", i);
-        delay(100);  // 100ms per LED = 6.4 seconds total
+        delay(25);  // Reduced from 100ms to 25ms per LED
     }
+    fill_solid(leds, NUM_LEDS, CRGB::White);  // Flash all
+    FastLED.show();
+    delay(250);  // Quick flash
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
 }
@@ -116,34 +118,56 @@ void testLEDs() {
  * Will attempt connection maxAttempts times before giving up
  */
 void connectToWiFi() {
-    int attempts = 0;
-    const int maxAttempts = 3;
+    Serial.println("Starting WiFiManager...");
     
-    while (attempts < maxAttempts) {
-        Serial.printf("WiFi attempt %d of %d...\n", attempts + 1, maxAttempts);
-        WiFi.begin(ssid, password);
-        
-        int waitCount = 0;
-        while (WiFi.status() != WL_CONNECTED && waitCount < 20) {  // 10 second timeout
-            delay(500);
-            Serial.print(".");
-            waitCount++;
-        }
-        
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("\nWiFi connected");
-            Serial.println("IP address: ");
-            Serial.println(WiFi.localIP());
-            return;
-        }
-        
-        Serial.println("\nWiFi connection failed, retrying...");
-        WiFi.disconnect();
-        delay(1000);
-        attempts++;
+    // Add custom HTML with time display and auto-update
+    const char* customHTML = R"(
+        <div id='time-display' style='
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            text-align: center;
+            font-size: 1.2em;
+        '>
+            Current Time: <span id='current-time'>--:--</span>
+        </div>
+        <script>
+            function updateTime() {
+                const now = new Date();
+                const timeStr = now.toLocaleTimeString();
+                document.getElementById('current-time').textContent = timeStr;
+            }
+            // Update immediately and then every second
+            updateTime();
+            setInterval(updateTime, 1000);
+        </script>
+    )";
+    
+    // Configure WiFiManager
+    wm.setDebugOutput(true);
+    wm.setCaptivePortalEnable(true);
+    wm.setConfigPortalTimeout(180);
+    
+    // Add custom HTML to the portal
+    wm.setCustomHeadElement(customHTML);
+    
+    // Try to connect using saved credentials
+    bool connected = wm.autoConnect("WordClock-AP", "password123");
+    
+    if (!connected) {
+        Serial.println("Failed to connect and hit timeout");
+        delay(3000);
+        ESP.restart();
     }
     
-    Serial.println("Could not connect to WiFi. Continuing without network...");
+    // Start the config portal in non-blocking mode
+    wm.startWebPortal();
+    Serial.println("Web portal started");
+    
+    Serial.println("\nWiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
 }
 
 // Add a simulated time for testing
@@ -360,9 +384,11 @@ void setup() {
  * 4. Waits 1 second before next update
  */
 void loop() {
-    events();  // Handle ezTime events if connected
+    if (WiFi.status() == WL_CONNECTED) {
+        wm.process();  // Add this to keep WiFiManager running
+    }
     
+    events();
     displayTime(getTime());
-    
     delay(1000);
 } 
