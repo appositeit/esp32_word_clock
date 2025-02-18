@@ -38,10 +38,11 @@
 #include <WiFi.h>
 #include <ezTime.h>
 #include <WiFiManager.h>
+#include "config.h"
+#include <ArduinoOTA.h>
+#include "favicon.h"
 
 // LED configuration
-#define NUM_LEDS 64
-#define DATA_PIN 10
 CRGB leds[NUM_LEDS];
 
 // Timezone
@@ -50,21 +51,92 @@ Timezone Australia;
 // Add WiFiManager instance
 WiFiManager wm;
 
-// Add after LED configuration
-#define LIGHT_SENSOR_PIN 2  // ADC pin for light sensor
-#define LIGHT_SAMPLES 10    // Number of samples to average
-
 // Add brightness settings structure
 struct BrightnessSettings {
-    int darkBrightness = 20;
-    int lightBrightness = 255;
-    int threshold = 2000;
+    int darkBrightness = 5;     // Changed from 20
+    int lightBrightness = 25;   // Changed from 255
+    int threshold = 2600;       // Changed from 2000
 } brightnessSettings;
 
 // Add function declarations at the top with others
 int readLightLevel();
 void updateBrightness();
 void bindServerCallback();
+
+// Add OTA setup function
+void setupOTA() {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    
+    ArduinoOTA.onStart([]() {
+        Serial.println("OTA: Start");
+        FastLED.clear(true);  // Clear LEDs during update
+    });
+    
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nOTA: End");
+    });
+    
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("OTA Progress: %u%%\r", (progress / (total / 100)));
+    });
+    
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+    
+    ArduinoOTA.begin();
+    Serial.println("OTA ready");
+}
+
+// Add OTA function declaration at top
+void setupOTA();
+
+// Add this function declaration at the top
+void showProgress(int step);
+
+// Add near the top with other globals
+const char* COMMON_TIMEZONES[] = {
+    "Africa/Cairo",
+    "America/Chicago",
+    "America/Los_Angeles",
+    "America/New_York",
+    "America/Toronto",
+    "Asia/Dubai",
+    "Asia/Hong_Kong",
+    "Asia/Singapore",
+    "Asia/Tokyo",
+    "Australia/Adelaide",
+    "Australia/Brisbane",
+    "Australia/Melbourne",
+    "Australia/Perth",
+    "Australia/Sydney",
+    "Europe/Amsterdam",
+    "Europe/Berlin",
+    "Europe/London",
+    "Europe/Paris",
+    "Pacific/Auckland"
+};
+
+// Add validation function
+bool isValidTimezone(const String& tz) {
+    // Check common timezones first
+    for (const char* validTz : COMMON_TIMEZONES) {
+        if (tz == validTz) return true;
+    }
+    
+    // Basic format validation
+    if (tz.indexOf('/') == -1) return false;  // Must contain region/city format
+    if (tz.length() < 7) return false;        // Minimum length (e.g., "US/East")
+    if (tz.indexOf(' ') != -1) return false;  // No spaces allowed
+    
+    return true;
+}
 
 // At the top of the file with other globals
 const char* BRIGHTNESS_PAGE_HTML = R"(
@@ -73,6 +145,7 @@ const char* BRIGHTNESS_PAGE_HTML = R"(
     <head>
         <meta name='viewport' content='width=device-width, initial-scale=1'>
         <title>Brightness Settings</title>
+        <link rel="icon" type="image/x-icon" href="/favicon.ico?v=1">
         <style>
             body { font-family: Arial; margin: 20px; background: #f0f0f0; }
             .container { 
@@ -87,14 +160,19 @@ const char* BRIGHTNESS_PAGE_HTML = R"(
                 margin: 15px 0;
                 display: flex;
                 align-items: center;
-                justify-content: space-between;
             }
-            label { margin-right: 10px; }
-            input {
+            .setting label { 
+                flex: 0 0 150px;
+                margin-right: 10px; 
+            }
+            .setting input { 
                 width: 100px;
-                padding: 5px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
+                margin-right: 10px;
+            }
+            .setting .current {
+                color: #666;
+                font-size: 0.9em;
+                margin-left: 10px;
             }
             .status {
                 background: #f8f8f8;
@@ -118,6 +196,11 @@ const char* BRIGHTNESS_PAGE_HTML = R"(
             }
             button.back { background: #666; }
             button:hover { opacity: 0.9; }
+            .help {
+                font-size: 0.8em;
+                color: #666;
+                margin-left: 10px;
+            }
         </style>
     </head>
     <body>
@@ -126,24 +209,66 @@ const char* BRIGHTNESS_PAGE_HTML = R"(
             
             <div class='status'>
                 <div>Current Time: <span id='time'>--:--</span></div>
-                <div>Room Light Level: <span id='lightLevel'>--</span></div>
+                <div>
+                    Room Light Level: <span id='lightLevel'>--</span>
+                    <label style="margin-left: 15px;">
+                        <input type="checkbox" id="fastReadout"> Fast updates
+                    </label>
+                </div>
                 <div>Current Brightness: <span id='brightness'>--</span></div>
             </div>
 
             <form id='brightnessForm'>
                 <div class='setting'>
                     <label>Dark Mode Brightness:</label>
-                    <input type='number' name='darkBrightness' min='0' max='255'>
+                    <input type='number' name='darkBrightness' min='0' max='255' required>
+                    <span class='current'>(Current: <span id='currentDark'>--</span>)</span>
+                    <div class='help'>Range: 0-255. Recommended: 1-10 for dark rooms.</div>
                 </div>
                 
                 <div class='setting'>
                     <label>Light Mode Brightness:</label>
-                    <input type='number' name='lightBrightness' min='0' max='255'>
+                    <input type='number' name='lightBrightness' min='0' max='255' required>
+                    <span class='current'>(Current: <span id='currentLight'>--</span>)</span>
+                    <div class='help'>Range: 0-255. Recommended: 20-50 for bright rooms.</div>
                 </div>
                 
                 <div class='setting'>
                     <label>Light/Dark Threshold:</label>
-                    <input type='number' name='threshold' min='0'>
+                    <input type='number' name='threshold' min='0' max='4095' required>
+                    <span class='current'>(Current: <span id='currentThreshold'>--</span>)</span>
+                    <div class='help'>Range: 0-4095. Higher values mean the room needs to be brighter to trigger light mode.</div>
+                </div>
+                
+                <div class='setting'>
+                    <label>Timezone:</label>
+                    <input type='text' name='timezone' list='timezones' required>
+                    <datalist id='timezones'>
+                        <option value="Africa/Cairo">Africa/Cairo</option>
+                        <option value="America/Chicago">US Central</option>
+                        <option value="America/Los_Angeles">US Pacific</option>
+                        <option value="America/New_York">US Eastern</option>
+                        <option value="America/Toronto">Eastern Canada</option>
+                        <option value="Asia/Dubai">Dubai</option>
+                        <option value="Asia/Hong_Kong">Hong Kong</option>
+                        <option value="Asia/Singapore">Singapore</option>
+                        <option value="Asia/Tokyo">Japan</option>
+                        <option value="Australia/Adelaide">Adelaide</option>
+                        <option value="Australia/Brisbane">Brisbane</option>
+                        <option value="Australia/Melbourne">Melbourne</option>
+                        <option value="Australia/Perth">Perth</option>
+                        <option value="Australia/Sydney">Sydney</option>
+                        <option value="Europe/Amsterdam">Netherlands</option>
+                        <option value="Europe/Berlin">Germany</option>
+                        <option value="Europe/London">UK</option>
+                        <option value="Europe/Paris">France</option>
+                        <option value="Pacific/Auckland">New Zealand</option>
+                    </datalist>
+                    <span class='current'>(Current: <span id='currentTimezone'>--</span>)</span>
+                    <div class='help'>
+                        Enter timezone from the <a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank">tz database</a> 
+                        or select from common options. Format: Region/City (e.g., "America/New_York")
+                    </div>
                 </div>
                 
                 <div class='buttons'>
@@ -154,7 +279,11 @@ const char* BRIGHTNESS_PAGE_HTML = R"(
         </div>
 
         <script>
-            // Update status every 5 seconds
+            let updateInterval = 5000;
+            let updateTimer = null;
+            let inputsInitialized = false;  // Track if inputs have been initialized
+
+            // Update status
             function updateStatus() {
                 fetch('/api/status')
                     .then(r => r.json())
@@ -163,17 +292,34 @@ const char* BRIGHTNESS_PAGE_HTML = R"(
                         document.getElementById('brightness').textContent = data.currentBrightness;
                         document.getElementById('time').textContent = new Date().toLocaleTimeString();
                         
-                        // Update form values with current settings
-                        document.querySelector('[name="darkBrightness"]').value = data.settings.darkBrightness;
-                        document.querySelector('[name="lightBrightness"]').value = data.settings.lightBrightness;
-                        document.querySelector('[name="threshold"]').value = data.settings.threshold;
+                        // Update current values display
+                        document.getElementById('currentDark').textContent = data.settings.darkBrightness;
+                        document.getElementById('currentLight').textContent = data.settings.lightBrightness;
+                        document.getElementById('currentThreshold').textContent = data.settings.threshold;
+                        document.getElementById('currentTimezone').textContent = data.timezone;
+                        
+                        // Set input values only on first load
+                        if (!inputsInitialized) {
+                            document.querySelector('[name="darkBrightness"]').value = data.settings.darkBrightness;
+                            document.querySelector('[name="lightBrightness"]').value = data.settings.lightBrightness;
+                            document.querySelector('[name="threshold"]').value = data.settings.threshold;
+                            document.querySelector('[name="timezone"]').value = data.timezone;
+                            inputsInitialized = true;
+                        }
                     })
                     .catch(console.error);
             }
             
+            // Handle fast readout toggle
+            document.getElementById('fastReadout').onchange = function(e) {
+                clearInterval(updateTimer);
+                updateInterval = e.target.checked ? 1000 : 5000;
+                updateTimer = setInterval(updateStatus, updateInterval);
+            };
+            
             // Initial update and start interval
             updateStatus();
-            setInterval(updateStatus, 5000);
+            updateTimer = setInterval(updateStatus, updateInterval);
             
             // Handle form submission
             document.getElementById('brightnessForm').onsubmit = function(e) {
@@ -260,7 +406,10 @@ void testLEDs() {
 
 // Add this function before connectToWiFi()
 void bindServerCallback() {
-    Serial.println("Binding server routes...");
+    // Add favicon route
+    wm.server->on("/favicon.ico", HTTP_GET, []() {
+        wm.server->send_P(200, "image/x-icon", (const char*)esp32wordclockBW_32x32_bmp, esp32wordclockBW_32x32_bmp_len);
+    });
     
     // Brightness configuration page
     wm.server->on("/brightness", HTTP_GET, []() {
@@ -269,9 +418,11 @@ void bindServerCallback() {
     
     // Get all status information
     wm.server->on("/api/status", HTTP_GET, []() {
+        if (DEBUG_LEVEL > 1) Serial.println("GET /api/status");
         String json = "{";
         json += "\"lightLevel\":" + String(readLightLevel()) + ",";
         json += "\"currentBrightness\":" + String(FastLED.getBrightness()) + ",";
+        json += "\"timezone\":\"" + String(DEFAULT_TIMEZONE) + "\",";  // Use the IANA identifier instead
         json += "\"settings\":{";
         json += "\"darkBrightness\":" + String(brightnessSettings.darkBrightness) + ",";
         json += "\"lightBrightness\":" + String(brightnessSettings.lightBrightness) + ",";
@@ -282,6 +433,17 @@ void bindServerCallback() {
     
     // Save brightness settings
     wm.server->on("/api/saveBrightness", HTTP_POST, []() {
+        if (DEBUG_LEVEL > 0) {
+            Serial.println("POST /api/saveBrightness");
+            if (wm.server->args() > 0) {
+                Serial.println("Args:");
+                for (int i = 0; i < wm.server->args(); i++) {
+                    Serial.printf("  %s: %s\n", 
+                        wm.server->argName(i).c_str(), 
+                        wm.server->arg(i).c_str());
+                }
+            }
+        }
         bool changed = false;
         
         if (wm.server->hasArg("darkBrightness")) {
@@ -296,6 +458,21 @@ void bindServerCallback() {
             brightnessSettings.threshold = wm.server->arg("threshold").toInt();
             changed = true;
         }
+        if (wm.server->hasArg("timezone")) {
+            String newTimezone = wm.server->arg("timezone");
+            if (isValidTimezone(newTimezone)) {
+                if (Australia.setLocation(newTimezone)) {
+                    changed = true;
+                    waitForSync(10);
+                } else {
+                    wm.server->send(400, "text/plain", "Invalid timezone");
+                    return;
+                }
+            } else {
+                wm.server->send(400, "text/plain", "Invalid timezone format");
+                return;
+            }
+        }
         
         if (changed) {
             updateBrightness();
@@ -303,36 +480,29 @@ void bindServerCallback() {
         
         wm.server->send(200, "text/plain", "OK");
     });
-    
-    Serial.println("Routes bound successfully");
 }
 
 // Then modify connectToWiFi()
 void connectToWiFi() {
     Serial.println("Starting WiFiManager...");
     
-    // Add custom HTML with time display and brightness button
+    // Set portal title and theme
+    wm.setTitle("WordClock");
+    wm.setClass("invert");
+    
+    // Add custom HTML to the portal at the bottom
     const char* customHTML = R"(
+        <br/>
+        <form action='/brightness' method='get'>
+            <button>Configure Brightness</button>
+        </form>
         <div id='time-display' style='
-            background: white;
-            padding: 10px;
-            border-radius: 4px;
-            margin: 10px 0;
             text-align: center;
-            font-size: 1.2em;
+            padding: 10px;
+            color: #444;
+            margin-top: 20px;
         '>
             Current Time: <span id='current-time'>--:--</span>
-        </div>
-        <div style='text-align: center; margin: 10px 0;'>
-            <button onclick='window.location.href="/brightness"' style='
-                padding: 10px 20px;
-                font-size: 1.1em;
-                background: #1fa3ec;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            '>Configure Brightness</button>
         </div>
         <script>
             function updateTime() {
@@ -346,9 +516,9 @@ void connectToWiFi() {
     )";
     
     // Configure WiFiManager
-    wm.setDebugOutput(true);
     wm.setCaptivePortalEnable(true);
     wm.setConfigPortalTimeout(180);
+    wm.setShowInfoUpdate(false);  // Hide the default info/update buttons
     
     // Set up the callback for adding our routes
     wm.setWebServerCallback(bindServerCallback);
@@ -356,11 +526,19 @@ void connectToWiFi() {
     // Add custom HTML to the portal
     wm.setCustomHeadElement(customHTML);
     
-    // Try to connect using saved credentials
-    bool connected = wm.autoConnect("WordClock-AP", "password123");
+    // Try to connect using saved credentials or defaults
+    bool connected = wm.autoConnect(WIFI_AP_NAME, WIFI_AP_PASSWORD);
+    
+    // If default credentials are set, try them
+    if (!connected && strlen(DEFAULT_WIFI_SSID) > 0) {
+        Serial.println("Trying default credentials...");
+        WiFi.begin(DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASSWORD);
+        delay(5000);  // Give it time to connect
+        connected = (WiFi.status() == WL_CONNECTED);
+    }
     
     if (!connected) {
-        Serial.println("Failed to connect and hit timeout");
+        Serial.println("Failed to connect");
         delay(3000);
         ESP.restart();
     }
@@ -557,6 +735,10 @@ void updateBrightness() {
     FastLED.show();
 }
 
+// Add a variable to track last brightness update
+unsigned long lastBrightnessCheck = 0;
+#define BRIGHTNESS_CHECK_INTERVAL 1000  // Check every second
+
 /**
  * Setup routine
  * 1. Initializes serial communication
@@ -573,24 +755,33 @@ void setup() {
     // Initialize FastLED
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
     FastLED.setBrightness(50);
+    showProgress(0);  // Show "IT IS ONE"
     
-    // Test LEDs first
+    // Test LEDs
     testLEDs();
+    showProgress(1);  // Show "IT IS TWO"
     
     // Connect to WiFi
     connectToWiFi();
+    showProgress(2);  // Show "IT IS THREE"
     
     if (WiFi.status() == WL_CONNECTED) {
+        setupOTA();
+        showProgress(3);  // Show "IT IS FOUR"
+        
         // Try to sync time with retries
         int syncAttempts = 0;
+        int progressCount = 4;  // Start at FIVE
+        
         while (syncAttempts < 3) {
             Serial.printf("NTP sync attempt %d of 3...\n", syncAttempts + 1);
-            waitForSync(10);  // 10 second timeout
+            showProgress(progressCount++);  // Show next number and increment
+            waitForSync(10);
             
             if (timeStatus() != timeNotSet) {
                 Australia.setLocation("Australia/Sydney");
                 Serial.println("Current Sydney time: " + Australia.dateTime());
-                simulatedTime = Australia.now();  // Initialize simulated time
+                simulatedTime = Australia.now();
                 break;
             }
             
@@ -598,9 +789,9 @@ void setup() {
             delay(1000);
             syncAttempts++;
         }
-    } else {
-        // Start simulated time at 12:00
-        simulatedTime = 43200;  // 12:00:00
+        
+        showProgress(5);  // Show final number (SIX) before starting
+        delay(1000);  // Show final progress state briefly
     }
 }
 
@@ -613,10 +804,59 @@ void setup() {
  */
 void loop() {
     if (WiFi.status() == WL_CONNECTED) {
-        wm.process();  // Add this to keep WiFiManager running
+        ArduinoOTA.handle();  // Handle OTA updates
+        wm.process();         // Keep WiFiManager running
+    }
+    
+    // Check if it's time to update brightness
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastBrightnessCheck >= BRIGHTNESS_CHECK_INTERVAL) {
+        updateBrightness();
+        lastBrightnessCheck = currentMillis;
     }
     
     events();
     displayTime(getTime());
     delay(1000);
+}
+
+void showBootAnimation() {
+    // Numbers 1-12 in sequence
+    const int NUMBERS[] = {9, 11, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20};  // Word indices for 1-12
+    
+    for (int i = 0; i < 12; i++) {
+        fill_solid(leds, NUM_LEDS, CRGB::Black);  // Clear display
+        
+        // Show "IT IS"
+        for (int j = 0; j < WORD_LENGTHS[0]; j++) {
+            leds[WORDS[0][j]] = CRGB::White;
+        }
+        
+        // Show current number
+        for (int j = 0; j < WORD_LENGTHS[NUMBERS[i]]; j++) {
+            leds[WORDS[NUMBERS[i]][j]] = CRGB::White;
+        }
+        
+        FastLED.show();
+        delay(500);  // Show each number for half a second
+    }
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show();
+}
+
+// Add the function implementation
+void showProgress(int step) {
+    // Numbers in order of display for setup progress
+    const int PROGRESS_NUMBERS[] = {9, 11, 10, 12, 13, 14};  // Word indices for ONE through SIX
+    
+    if (step >= 0 && step < 6) {  // We have 6 progress steps
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        
+        // Show progress number only
+        for (int j = 0; j < WORD_LENGTHS[PROGRESS_NUMBERS[step]]; j++) {
+            leds[WORDS[PROGRESS_NUMBERS[step]][j]] = CRGB::White;
+        }
+        
+        FastLED.show();
+    }
 } 
